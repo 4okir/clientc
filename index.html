@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f0e7">
+  <meta name="description" content="Дело в шляпе. Небольшой интерактивный этюд: выберите цвет и приподнимите шляпу.">
+  <title>ШЛЯПА. — Дело в шляпе</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Перейти к содержимому</a>
+  <header class="header page-width">
+    <a class="wordmark" href="#" aria-label="Шляпа — на главную">ШЛЯПА<span>.</span></a>
+    <nav aria-label="Основная навигация">
+      <a href="#colors">Выбрать цвет <span aria-hidden="true">↗</span></a>
+      <a href="#details">В деталях</a>
+    </nav>
+    <span class="header-note"><i aria-hidden="true"></i> Маленькая вещь. Большой характер.</span>
+  </header>
+
+  <main id="main">
+    <section class="hero page-width" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span aria-hidden="true">✳</span> Этюд об одной шляпе</p>
+        <h1 id="hero-title">Дело<br>в <em>шляпе.</em></h1>
+        <p class="hero-description">Хорошая форма, немного характера<br class="desktop-break"> и цвет под настроение. Остальное<br class="desktop-break"> приложится.</p>
+        <a class="primary-link" href="#colors">Найти свой цвет <span aria-hidden="true">↗</span></a>
+        <div class="edition"><span class="edition-line" aria-hidden="true"></span><span>Один силуэт.<br>Тысяча поводов его примерить.</span></div>
+      </div>
+
+      <div class="showcase" id="colors" aria-label="Интерактивная шляпа">
+        <div class="showcase-meta"><span>ФОРМА № 001</span><span id="color-code">01 / ГРАФИТ</span></div>
+        <div class="hat-stage" id="hat-stage">
+          <div class="stage-circle" aria-hidden="true"></div>
+          <span class="stage-letter" aria-hidden="true">Ш.</span>
+          <div class="hat-tilt" id="hat-tilt"><div class="hat-art" id="hat-art" role="img" aria-label="Фетровая шляпа цвета графит"><img src="./hat.svg" alt="" width="900" height="650" style="display:block;width:100%;height:auto"></div></div>
+          <button class="tip-button" id="tip-hat" type="button" aria-label="Приподнять шляпу в знак приветствия"><span aria-hidden="true">↗</span></button>
+          <span class="stage-hint">Можно снять. В знак уважения.</span>
+        </div>
+        <div class="color-panel">
+          <div class="color-label"><span>ВАШЕ НАСТРОЕНИЕ</span><strong id="color-name" aria-live="polite">Графит</strong></div>
+          <div class="swatches" role="group" aria-label="Цвет шляпы">
+            <button class="swatch graphite is-selected" type="button" data-color="graphite" aria-label="Графит" aria-pressed="true"><span></span></button>
+            <button class="swatch clay" type="button" data-color="clay" aria-label="Терракота" aria-pressed="false"><span></span></button>
+            <button class="swatch olive" type="button" data-color="olive" aria-label="Олива" aria-pressed="false"><span></span></button>
+            <button class="swatch sand" type="button" data-color="sand" aria-label="Песок" aria-pressed="false"><span></span></button>
+          </div>
+        </div>
+        <p id="hat-greeting" class="hat-greeting" role="status"></p>
+      </div>
+    </section>
+
+    <div class="ticker" aria-label="Простая форма, свободный характер">
+      <div class="page-width ticker-inner"><span>ПРОСТАЯ ФОРМА</span><span class="ticker-star" aria-hidden="true">✳</span><span>СВОБОДНЫЙ ХАРАКТЕР</span><span class="ticker-star" aria-hidden="true">✳</span><span>ВСЁ ДЕЛО В ДЕТАЛЯХ</span><span class="ticker-star" aria-hidden="true">✳</span></div>
+    </div>
+
+    <section class="details page-width" id="details" aria-labelledby="details-title">
+      <div class="details-heading"><p class="eyebrow">Ничего лишнего</p><h2 id="details-title">Меньше суеты.<br>Больше <em>характера.</em></h2><p>Иногда для настроения<br>достаточно одной детали.</p></div>
+      <dl class="detail-list">
+        <div><dt><span>01</span> Плавная тулья</dt><dd>Тот самый узнаваемый силуэт.<br>Спокойный, но с собственным мнением.</dd></div>
+        <div><dt><span>02</span> Широкие поля</dt><dd>Немного тени.<br>Немного загадки.</dd></div>
+        <div><dt><span>03</span> Последний штрих</dt><dd>Лента, которая собирает всё воедино.<br>Потому что мелочей не бывает.</dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="footer page-width"><a class="wordmark" href="#">ШЛЯПА<span>.</span></a><p>Сделано, чтобы снимать шляпу.</p><span>ЦИФРОВОЙ ЭТЮД · 2026</span></footer>
+  <noscript><p class="noscript-note">Для смены цвета и анимации включите JavaScript.</p></noscript>
+</body>
+</html>
