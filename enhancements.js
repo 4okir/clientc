@@ -1,4 +1,4 @@
-import { getAchievements, getPhrase, createSoundPlayer } from './personality.js?v=5';
+import { getAchievements, getPhrase, createSoundPlayer } from './personality.js?v=6';
 
 export const SOUND_KEY = 'diman-counter:preferences:sound-v1';
 

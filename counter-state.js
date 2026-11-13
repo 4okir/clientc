@@ -15,7 +15,9 @@ export function validSnapshot(value) {
     && integer(value.revision) && value.revision >= value.total
     && (value.lastAt === null || (typeof value.lastAt === 'string' && Number.isFinite(Date.parse(value.lastAt))))
     && (value.ownLastEventId === null || (typeof value.ownLastEventId === 'string' && UUID.test(value.ownLastEventId)))
-    && typeof value.serverTime === 'string' && Number.isFinite(Date.parse(value.serverTime));
+    && typeof value.serverTime === 'string' && Number.isFinite(Date.parse(value.serverTime))
+    && (!Object.hasOwn(value, 'appliedIds') || (Array.isArray(value.appliedIds) && value.appliedIds.length <= 5000
+      && value.appliedIds.every(id => typeof id === 'string' && UUID.test(id))));
 }
 export function validOperation(value) {
   return !!value && typeof value.id === 'string' && UUID.test(value.id) && validDevice(value)
@@ -33,7 +35,10 @@ export function readPending(storage) {
     const value = readJson(storage, key);
     if (validOperation(value) && key === PENDING_PREFIX + value.id) operations.push(value);
   }
-  operations.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+  return orderOperations(operations);
+}
+export function orderOperations(operations) {
+  operations = operations.filter(validOperation).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   const byId = new Map(operations.map(value => [value.id, value]));
   const ordered = [], seen = new Set();
   for (const value of operations) {
@@ -42,6 +47,32 @@ export function readPending(storage) {
     if (!seen.has(value.id)) { ordered.push(value); seen.add(value.id); }
   }
   return ordered;
+}
+export function optimisticTotal(snapshot, pending, legacyPendingIds = []) {
+  const valid = validSnapshot(snapshot);
+  const applied = new Set([...(valid && Array.isArray(snapshot.appliedIds) ? snapshot.appliedIds : []), ...legacyPendingIds]);
+  let total = valid ? snapshot.total : 0;
+  for (const operation of orderOperations(pending)) {
+    if (!applied.has(operation.id)) total += operation.action === 'increment' ? 1 : -1;
+  }
+  return Math.max(0, total);
+}
+export function selectBatch(pending, max = 32) {
+  const ordered = orderOperations(pending);
+  if (!ordered.length) return null;
+  const { device, token } = ordered[0];
+  const limit = Number.isInteger(max) && max > 0 ? Math.min(max, 32) : 32;
+  const queued = new Set(ordered.map(operation => operation.id));
+  const included = new Set(), events = [];
+  for (const operation of ordered) {
+    if (operation.device !== device || operation.token !== token) continue;
+    if (operation.action === 'undo' && queued.has(operation.target) && !included.has(operation.target)) continue;
+    events.push({ action: operation.action, id: operation.id,
+      ...(operation.action === 'undo' ? { target: operation.target } : {}) });
+    included.add(operation.id);
+    if (events.length >= limit) break;
+  }
+  return { device, token, events, pending: ordered.map(operation => operation.id) };
 }
 export function storeOperation(storage, value) {
   if (!validOperation(value)) throw new Error('Invalid operation');
@@ -52,7 +83,21 @@ export function eventBody(operation) {
   return { action: operation.action, id: operation.id, device: operation.device,
     ...(operation.action === 'undo' ? { target: operation.target } : {}) };
 }
-export function mergeSnapshot(current, incoming) {
+export function mergeSnapshot(current, incoming, pendingIds) {
   if (!validSnapshot(incoming)) throw new Error('Invalid snapshot');
-  return !validSnapshot(current) || incoming.revision >= current.revision ? { ...incoming } : current;
+  let merged;
+  if (!validSnapshot(current) || incoming.revision > current.revision) merged = { ...incoming };
+  else if (incoming.revision < current.revision) {
+    if (pendingIds === undefined) return current;
+    merged = current;
+  }
+  else if (!Object.hasOwn(current, 'appliedIds') && !Object.hasOwn(incoming, 'appliedIds')) merged = { ...incoming };
+  else merged = { ...incoming, appliedIds: [...new Set([...(current.appliedIds || []), ...(incoming.appliedIds || [])])] };
+  if (Object.hasOwn(merged, 'appliedIds')) {
+    const pending = pendingIds === undefined ? null : new Set(pendingIds);
+    const appliedIds = [...new Set(merged.appliedIds)].filter(id => !pending || pending.has(id));
+    if (appliedIds.length > 5000) throw new Error('Snapshot receipts exceed 5000; supply active pending IDs');
+    return { ...merged, appliedIds };
+  }
+  return merged;
 }

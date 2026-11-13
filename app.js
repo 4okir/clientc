@@ -1,6 +1,12 @@
-import { DEVICE_KEY, SNAPSHOT_KEY, PENDING_PREFIX, validDevice, validSnapshot, readJson, readPending, storeOperation, removeOperation, eventBody, mergeSnapshot } from './counter-state.js?v=3';
+import { DEVICE_KEY, SNAPSHOT_KEY, PENDING_PREFIX, validDevice, validSnapshot, validOperation, readJson, orderOperations, optimisticTotal, selectBatch, mergeSnapshot } from './counter-state.js?v=6';
 
-const API = "https://diman-counter-4okir.mythic-peach-5761.chatgpt.site";
+const API = 'https://diman-counter-4okir.mythic-peach-5761.chatgpt.site';
+// Old tabs may still submit v1 operations. Preserve their queue while isolating
+// new operations and receipt-aware snapshots from that older client.
+const FAST_PENDING_PREFIX = 'diman-counter:v2:pending:';
+const FAST_SNAPSHOT_KEY = 'diman-counter:v2:snapshot';
+const SYNC_LOCK = 'diman-counter:v2:sync';
+const LIMIT = 5000;
 const $ = id => document.getElementById(id);
 const format = new Intl.NumberFormat('ru-RU');
 const timeFormat = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -17,140 +23,184 @@ catch {
 }
 let device = readJson(storage, DEVICE_KEY);
 if (!validDevice(device)) device = null;
-const cached = readJson(storage, SNAPSHOT_KEY);
+const fastCache = readJson(storage, FAST_SNAPSHOT_KEY);
+const cached = validSnapshot(fastCache?.value) ? fastCache : readJson(storage, SNAPSHOT_KEY);
 let snapshot = validSnapshot(cached?.value) ? cached.value : null;
 if (snapshot && cached.device !== device?.device) snapshot = { ...snapshot, ownLastEventId: null };
-let reachable = false, syncing = false, reading = false, starting = false;
-let lastSuccess = 0, lastOrder = Date.now() * 1000, toastTimer, animationTimer;
-const LIMIT = 500;
+const queue = new Map();
+let reachable = false, syncing = false, starting = false;
+let syncPromise = null, syncTimer, renderFrame, toastTimer, animationTimer;
+let lastSuccess = 0, lastOrder = Date.now() * 1000;
 let enhancements = null;
 
 function toast(message) { clearTimeout(toastTimer); $('toast').textContent = message; toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 7000); }
-function pending() { try { return readPending(storage); } catch { return []; } }
+function queueKey(key) { return key?.startsWith(FAST_PENDING_PREFIX) || key?.startsWith(PENDING_PREFIX); }
+function remember(key, value) {
+  if (validOperation(value) && key === (key.startsWith(FAST_PENDING_PREFIX) ? FAST_PENDING_PREFIX : PENDING_PREFIX) + value.id) {
+    queue.set(value.id, { value, key, legacy: key.startsWith(PENDING_PREFIX) });
+    lastOrder = Math.max(lastOrder, value.order);
+  }
+}
+function loadQueue() {
+  queue.clear();
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i);
+    if (queueKey(key)) remember(key, readJson(storage, key));
+  }
+}
+function pending() { return orderOperations([...queue.values()].map(entry => entry.value)); }
+function legacyIds() { return [...queue.values()].filter(entry => entry.legacy).map(entry => entry.value.id); }
 function undoTarget(operations = pending()) {
   if (!device) return null;
   const own = operations.filter(value => value.device === device.device);
   const cancelled = new Set(own.filter(value => value.action === 'undo').map(value => value.target));
-  const latest = [...own].reverse().find(value => value.action === 'increment' && !cancelled.has(value.id));
+  const latest = [...own].reverse().find(value => value.action === 'increment' && !queue.get(value.id)?.legacy && !cancelled.has(value.id));
   if (latest) return latest.id;
   return snapshot?.ownLastEventId && !cancelled.has(snapshot.ownLastEventId) ? snapshot.ownLastEventId : null;
 }
+function scheduleRender() {
+  if (renderFrame) return;
+  renderFrame = requestAnimationFrame(() => { renderFrame = null; render(); });
+}
 function render() {
   const operations = pending();
-  $('counter-value').textContent = snapshot ? format.format(snapshot.total) : '—';
+  const total = optimisticTotal(snapshot, operations, legacyIds());
+  $('counter-value').textContent = snapshot || operations.length ? format.format(total) : '—';
   $('today-value').textContent = snapshot && dayFormat.format(new Date(snapshot.serverTime)) === dayFormat.format(new Date()) ? format.format(snapshot.today) : '—';
   $('last-value').textContent = snapshot?.lastAt ? timeFormat.format(new Date(snapshot.lastAt)) + ' МСК' : 'Пока тихо';
-  $('increment').disabled = !device || operations.length >= LIMIT;
-  $('undo').disabled = !undoTarget(operations) || operations.length >= LIMIT;
+  $('increment').disabled = !device || queue.size >= LIMIT;
+  $('undo').disabled = !undoTarget(operations) || queue.size >= LIMIT;
   const fresh = reachable && Date.now() - lastSuccess < 18000;
-  document.body.dataset.connection = fresh ? (operations.length || syncing ? 'syncing' : 'online') : (starting ? 'syncing' : 'offline');
-  $('connection-status').textContent = fresh ? (operations.length ? 'Сохраняем в общую базу…' : 'Сохранено · общий для всех')
-    : starting ? 'Подключаем общую базу…' : snapshot ? 'Нет связи · последнее сохранённое число' : 'Не удалось подключиться к базе';
+  document.body.dataset.connection = fresh ? (queue.size || syncing ? 'syncing' : 'online') : (starting ? 'syncing' : 'offline');
+  $('connection-status').textContent = fresh ? (queue.size ? 'Сохраняем в фоне…' : 'Сохранено · общий для всех')
+    : starting ? 'Подключаем общую базу…' : snapshot ? 'Нет связи · нажатия сохранены на устройстве' : 'Не удалось подключиться к базе';
   $('retry-sync').hidden = fresh || starting;
-  $('pending-note').textContent = operations.length
-    ? 'Ожидают подтверждения: ' + format.format(operations.length) + '. ' + (persistent ? 'Очередь сохранена на этом устройстве.' : 'Оставьте страницу открытой до сохранения.')
-    : persistent ? '' : 'Данные уже в общей базе. При потере связи оставьте страницу открытой до подтверждения.';
-  $('counter-value').style.fontSize = snapshot?.total >= 1000000 ? 'clamp(56px, 13vw, 145px)' : '';
-  try { enhancements?.render(snapshot); } catch { /* Optional presentation never blocks the counter. */ }
+  $('pending-note').textContent = queue.size
+    ? 'В фоне сохраняются: ' + format.format(queue.size) + '. Можно нажимать дальше. ' + (persistent ? '' : 'Оставьте страницу открытой до сохранения.')
+    : persistent ? '' : 'При потере связи оставьте страницу открытой до сохранения.';
+  $('counter-value').style.fontSize = total >= 1000000 ? 'clamp(56px, 13vw, 145px)' : '';
+  try { enhancements?.render(snapshot); } catch {}
 }
-function applySnapshot(value, sourceDevice) {
+function bump() {
+  if (reducedMotion.matches) return;
+  clearTimeout(animationTimer);
+  $('counter-value').classList.add('is-bumping'); $('stage-puff').classList.add('is-puffing');
+  animationTimer = setTimeout(() => { $('counter-value').classList.remove('is-bumping'); $('stage-puff').classList.remove('is-puffing'); }, 700);
+}
+function applySnapshot(value, sourceDevice, persist = true) {
   if (!validSnapshot(value)) throw new Error('Сервер вернул некорректное значение.');
-  if (snapshot && value.revision < snapshot.revision) return;
-  const previousTotal = snapshot?.total;
   const ownLastEventId = sourceDevice === device?.device ? value.ownLastEventId : snapshot?.ownLastEventId ?? null;
-  snapshot = mergeSnapshot(snapshot, { ...value, ownLastEventId });
-  try { storage.setItem(SNAPSHOT_KEY, JSON.stringify({ value: snapshot, device: device?.device })); } catch { /* The confirmed value remains on the server. */ }
+  snapshot = mergeSnapshot(snapshot, { ...value, ownLastEventId }, [...queue.keys()]);
+  // Save receipts before deleting operations, so a reload cannot count them twice.
+  if (persist) try { storage.setItem(FAST_SNAPSHOT_KEY, JSON.stringify({ value: snapshot, device: device?.device })); } catch {}
   reachable = true; lastSuccess = Date.now();
-  if (previousTotal !== undefined && previousTotal !== snapshot.total && !reducedMotion.matches) {
-    clearTimeout(animationTimer);
-    $('counter-value').classList.remove('is-bumping'); $('stage-puff').classList.remove('is-puffing');
-    void $('counter-value').offsetWidth;
-    $('counter-value').classList.add('is-bumping'); $('stage-puff').classList.add('is-puffing');
-    animationTimer = setTimeout(() => { $('counter-value').classList.remove('is-bumping'); $('stage-puff').classList.remove('is-puffing'); }, 700);
-  }
-  render();
+  scheduleRender();
 }
-async function request(path, { method = 'GET', token, body } = {}) {
+function removeQueued(id) {
+  const entry = queue.get(id);
+  if (!entry) return;
+  try { storage.removeItem(entry.key); } catch { return; }
+  queue.delete(id);
+}
+function acknowledge(ids) {
+  let ownIncrement = false;
+  for (const id of ids) {
+    const operation = queue.get(id)?.value;
+    if (operation?.action === 'increment' && operation.device === device?.device) ownIncrement = true;
+    removeQueued(id);
+  }
+  if (ownIncrement) try { Promise.resolve(enhancements?.confirmedIncrement(snapshot.total)).catch(() => {}); } catch {}
+}
+async function request(path, { token, body } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
   try {
     const response = await fetch(API + path, {
-      method, credentials: 'omit', cache: 'no-store', signal: controller.signal,
+      method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
       headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {})
     });
     const value = await response.json();
-    if (!response.ok) { const error = new Error(value.error || 'Не удалось сохранить. Попробуем ещё раз.'); error.status = response.status; throw error; }
+    if (!response.ok) { const error = new Error(value.error || 'Не удалось сохранить. Попробуем ещё раз.'); error.status = response.status; error.eventId = value.eventId; throw error; }
     return value;
   } finally { clearTimeout(timeout); }
 }
+function scheduleSync(delay = 80) {
+  if (syncTimer) return;
+  syncTimer = setTimeout(() => { syncTimer = null; sync(); }, delay);
+}
+async function reconcile(identity) {
+  const value = await request('/api/sync', { token: identity.token, body: { device: identity.device, events: [], pending: [...queue.keys()] } });
+  if (!Array.isArray(value.appliedIds)) throw new Error('Сервер ещё обновляется. Повторим сохранение.');
+  applySnapshot(value, identity.device);
+  acknowledge(value.appliedIds);
+}
+function sync() {
+  if (!device) return Promise.resolve();
+  if (syncPromise) return syncPromise;
+  syncing = true; scheduleRender();
+  const work = async () => {
+    loadQueue();
+    const shared = readJson(storage, FAST_SNAPSHOT_KEY);
+    if (validSnapshot(shared?.value)) applySnapshot(shared.value, shared.device, false);
+    for (let turn = 0; turn < 16; turn++) {
+      const batch = selectBatch(pending());
+      const identity = batch || device;
+      try {
+        const value = await request('/api/sync', { token: identity.token, body: { device: identity.device, events: batch?.events || [], pending: [...queue.keys()] } });
+        if (!Array.isArray(value.appliedIds)) throw new Error('Сервер ещё обновляется. Повторим сохранение.');
+        applySnapshot(value, identity.device);
+        acknowledge(value.appliedIds);
+      } catch (error) {
+        const rejected = queue.get(error.eventId)?.value;
+        if (rejected?.action === 'undo' && [404, 409].includes(error.status)) {
+          await reconcile(identity);
+          removeQueued(rejected.id);
+          toast('Это нажатие уже отменено. Остальные сохраняются.');
+          continue;
+        }
+        throw error;
+      }
+      if (!queue.size) break;
+      loadQueue();
+    }
+  };
+  // Serialize new tabs, including reads. The API also deduplicates every ID.
+  const lockedWork = navigator.locks?.request ? () => navigator.locks.request(SYNC_LOCK, work) : work;
+  syncPromise = Promise.resolve().then(lockedWork).catch(error => {
+    reachable = false;
+    if (error.status === 401 && !queue.size) { device = null; try { storage.removeItem(DEVICE_KEY); } catch {} }
+    if (error.status) toast(error.message);
+  }).finally(() => {
+    syncPromise = null; syncing = false; scheduleRender();
+    if (queue.size && reachable) scheduleSync(0);
+  });
+  return syncPromise;
+}
 async function connect() {
   if (starting) return;
-  starting = true; render();
+  starting = true; scheduleRender();
   try {
     if (!device) {
-      const identity = await request('/api/device', { method: 'POST' });
+      const identity = await request('/api/device');
       if (!validDevice(identity)) throw new Error('Не удалось подключить устройство.');
       device = identity;
       try { storage.setItem(DEVICE_KEY, JSON.stringify(device)); } catch { persistent = false; }
     }
-    await refresh();
-    if (reachable) await flush();
+    await sync();
   } catch { reachable = false; }
-  finally { starting = false; render(); }
-}
-async function refresh() {
-  if (!device || reading) return;
-  reading = true;
-  try {
-    const value = await request('/api/count?device=' + encodeURIComponent(device.device), { token: device.token });
-    applySnapshot(value, device.device);
-  } catch (error) {
-    reachable = false;
-    if (error.status === 401 && !pending().length) { device = null; try { storage.removeItem(DEVICE_KEY); } catch {} }
-  } finally { reading = false; render(); }
-}
-async function flush() {
-  if (syncing || !device) return;
-  syncing = true; render();
-  try {
-    for (let i = 0; i < LIMIT; i++) {
-      const operation = pending()[0];
-      if (!operation) break;
-      try {
-        const value = await request('/api/events', { method: 'POST', token: operation.token, body: eventBody(operation) });
-        let firstAcknowledgement = false;
-        try { firstAcknowledgement = storage.getItem(PENDING_PREFIX + operation.id) !== null; } catch {}
-        applySnapshot(value, operation.device);
-        removeOperation(storage, operation.id);
-        if (firstAcknowledgement && operation.action === 'increment' && operation.device === device.device) {
-          try { Promise.resolve(enhancements?.confirmedIncrement(snapshot?.total ?? value.total)).catch(() => {}); } catch {}
-        }
-      } catch (error) {
-        if (operation.action === 'undo' && [404, 409].includes(error.status)) {
-          removeOperation(storage, operation.id);
-          toast('Нажатие уже отменено или не найдено. Обновляем общий счётчик.');
-          continue;
-        }
-        reachable = false;
-        if (error.status) toast(error.message);
-        break;
-      }
-      render();
-    }
-  } finally { syncing = false; render(); }
-  if (reachable) await refresh();
+  finally { starting = false; scheduleRender(); }
 }
 function enqueue(action, target) {
   if (!device) return;
-  const operations = pending();
-  if (operations.length >= LIMIT) { toast('Очередь заполнена. Дождитесь синхронизации.'); return; }
-  lastOrder = Math.max(Date.now() * 1000, lastOrder + 1, ...operations.map(value => value.order + 1));
+  if (queue.size >= LIMIT) { toast('Очередь заполнена. Подключитесь к сети, чтобы сохранить нажатия.'); return; }
+  lastOrder = Math.max(Date.now() * 1000, lastOrder + 1);
   const operation = { action, id: crypto.randomUUID(), device: device.device, token: device.token, order: lastOrder, ...(target ? { target } : {}) };
-  try { storeOperation(storage, operation); }
+  const key = FAST_PENDING_PREFIX + operation.id;
+  try { storage.setItem(key, JSON.stringify(operation)); }
   catch { toast('Браузер не смог сохранить нажатие. Попробуйте освободить место и повторить.'); return; }
-  toast(action === 'increment' ? 'Зафиксировали. Сохраняем…' : 'Отменяем ваше последнее нажатие…');
-  render(); flush();
+  queue.set(operation.id, { value: operation, key, legacy: false });
+  scheduleRender(); bump(); scheduleSync();
 }
 $('increment').addEventListener('click', () => enqueue('increment'));
 $('undo').addEventListener('click', () => { const target = undoTarget(); if (target) enqueue('undo', target); });
@@ -163,22 +213,28 @@ $('share').addEventListener('click', async () => {
   } catch (error) { if (error.name !== 'AbortError') toast('Ссылка на счётчик: ' + url); }
 });
 window.addEventListener('online', () => connect());
-window.addEventListener('offline', () => { reachable = false; render(); });
+window.addEventListener('offline', () => { reachable = false; scheduleRender(); });
 window.addEventListener('storage', event => {
-  if (event.key?.startsWith(PENDING_PREFIX)) { render(); flush(); }
-  if (event.key === SNAPSHOT_KEY) {
-    const next = readJson(storage, SNAPSHOT_KEY);
-    if (validSnapshot(next?.value) && (!snapshot || next.value.revision >= snapshot.revision)) {
-      snapshot = { ...next.value, ownLastEventId: next.device === device?.device ? next.value.ownLastEventId : snapshot?.ownLastEventId ?? null }; render();
-    }
+  if (event.key === null) loadQueue();
+  else if (queueKey(event.key)) {
+    const prefix = event.key.startsWith(FAST_PENDING_PREFIX) ? FAST_PENDING_PREFIX : PENDING_PREFIX;
+    queue.delete(event.key.slice(prefix.length));
+    if (event.newValue) remember(event.key, readJson(storage, event.key));
   }
+  if (event.key === FAST_SNAPSHOT_KEY) {
+    let next;
+    try { next = JSON.parse(event.newValue || 'null'); } catch {}
+    if (validSnapshot(next?.value)) applySnapshot(next.value, next.device, false);
+  }
+  scheduleRender();
+  if (event.key === null || queueKey(event.key)) scheduleSync();
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) connect(); });
 window.addEventListener('pageshow', () => connect());
-setInterval(() => { if (!document.hidden) { if (!device) connect(); else { refresh(); flush(); } } }, 5000);
-render(); connect();
-// Load entertainment after the reliable counter has started; failed downloads stay optional.
-import('./enhancements.js?v=5').then(({ mountEnhancements }) => {
+setInterval(() => { if (!document.hidden) { if (!device) connect(); else sync(); } }, 5000);
+loadQueue(); render(); connect();
+// Entertainment remains optional and cannot prevent saving.
+import('./enhancements.js?v=6').then(({ mountEnhancements }) => {
   enhancements = mountEnhancements({ storage, announce: toast });
   enhancements.render(snapshot);
 }).catch(() => {

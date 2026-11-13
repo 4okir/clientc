@@ -41,17 +41,17 @@ export function getPhrase(total, previousIndex, random = Math.random) {
 }
 
 const FART_VARIANTS = Object.freeze([
-  { duration: 0.23, high: 150, low: 55, pulses: 4, cutoff: 900, noise: 0.075, voice: 0.055 },
-  { duration: 0.31, high: 110, low: 40, pulses: 7, cutoff: 650, noise: 0.085, voice: 0.065 },
-  { duration: 0.43, high: 78, low: 29, pulses: 10, cutoff: 450, noise: 0.1, voice: 0.045 },
-  { duration: 0.49, high: 135, low: 43, pulses: 15, cutoff: 1100, noise: 0.08, voice: 0.06 }
+  { duration: 0.23, high: 150, low: 55, pulses: 4, cutoff: 900, noise: 0.3, voice: 0.22 },
+  { duration: 0.31, high: 110, low: 40, pulses: 7, cutoff: 650, noise: 0.34, voice: 0.26 },
+  { duration: 0.43, high: 78, low: 29, pulses: 10, cutoff: 450, noise: 0.4, voice: 0.18 },
+  { duration: 0.49, high: 135, low: 43, pulses: 15, cutoff: 1100, noise: 0.32, voice: 0.24 }
 ]);
 
 // The caller owns the sound preference. Importing/constructing never starts audio.
 // Invoke play() directly from the click gesture; it unlocks WebAudio internally.
 export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?? globalThis.webkitAudioContext, random = Math.random } = {}) {
   const supported = typeof AudioContextCtor === 'function';
-  let context = null, noiseBuffer = null, closed = false, busy = false;
+  let context = null, noiseBuffer = null, outputNode = null, outputNodes = [], closed = false, busy = false;
   let lastPlayedAt = -Infinity, lastVariant = -1;
   const activeSources = new Set();
   const disconnect = node => { try { node.disconnect(); } catch {} };
@@ -64,6 +64,36 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
       if (context.state !== 'running') await context.resume();
       return context.state === 'running';
     } catch { return false; }
+  }
+
+  function loudOutput() {
+    if (outputNode) return outputNode;
+    const nodes = [];
+    try {
+      const bus = context.createGain(); nodes.push(bus);
+      const compressor = context.createDynamicsCompressor(); nodes.push(compressor);
+      const limiter = context.createWaveShaper(); nodes.push(limiter);
+      bus.gain.setValueAtTime(1.6, context.currentTime);
+      compressor.threshold.setValueAtTime(-8, context.currentTime);
+      compressor.knee.setValueAtTime(8, context.currentTime);
+      compressor.ratio.setValueAtTime(12, context.currentTime);
+      compressor.attack.setValueAtTime(0.003, context.currentTime);
+      compressor.release.setValueAtTime(0.1, context.currentTime);
+      // Strong full-level output, with a shared soft ceiling for overlapping clicks.
+      const curve = new Float32Array(2049);
+      const scale = Math.tanh(2.2);
+      for (let i = 0; i < curve.length; i++) {
+        const input = i * 2 / (curve.length - 1) - 1;
+        curve[i] = 0.95 * Math.tanh(input * 2.2) / scale;
+      }
+      limiter.curve = curve; limiter.oversample = '2x';
+      bus.connect(compressor); compressor.connect(limiter); limiter.connect(context.destination);
+      outputNode = bus; outputNodes = nodes;
+      return bus;
+    } catch (error) {
+      for (const node of nodes) disconnect(node);
+      throw error;
+    }
   }
 
   async function play() {
@@ -83,6 +113,7 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
       if (lastVariant >= 0 && variantIndex >= lastVariant) variantIndex += 1;
       const variant = FART_VARIANTS[variantIndex];
       const { duration } = variant;
+      const output = loudOutput();
       const track = node => { nodes.push(node); return node; };
       if (!noiseBuffer) {
         noiseBuffer = context.createBuffer(1, Math.ceil(context.sampleRate * 0.55), context.sampleRate);
@@ -98,7 +129,7 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
       noiseGain.gain.setValueAtTime(0.0001, start);
       noiseGain.gain.linearRampToValueAtTime(variant.noise, start + 0.02);
       noiseGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-      noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(context.destination);
+      noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(output);
 
       const voice = track(context.createOscillator()); voice.type = 'sawtooth';
       voice.frequency.setValueAtTime(variant.high, start);
@@ -115,7 +146,7 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
       }
       voice.frequency.exponentialRampToValueAtTime(variant.low, start + duration);
       voiceGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-      voice.connect(voiceGain); voiceGain.connect(context.destination);
+      voice.connect(voiceGain); voiceGain.connect(output);
 
       sources.push(noise, voice);
       const cleanup = () => { for (const node of nodes) disconnect(node); for (const source of sources) activeSources.delete(source); };
@@ -140,7 +171,8 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
     for (const source of activeSources) { try { source.stop(); } catch {} disconnect(source); }
     activeSources.clear();
     if (context) { try { await context.close(); } catch {} }
-    context = null; noiseBuffer = null;
+    for (const node of outputNodes) disconnect(node);
+    context = null; noiseBuffer = null; outputNode = null; outputNodes = [];
   }
 
   return Object.freeze({ supported, unlock, play, close });
