@@ -1,167 +1,172 @@
-import {STYLES,COLORS,RIBBONS,SCENES,DEFAULT_LOOK,PRESETS,normalizeLook,parseLook,lookUrl,lookKey,sceneColors,colorizeSvg,normalizeFavorites} from './look-model.js';
+import { DEVICE_KEY, SNAPSHOT_KEY, PENDING_PREFIX, validDevice, validSnapshot, readJson, readPending, storeOperation, removeOperation, eventBody, mergeSnapshot } from './counter-state.js?v=3';
 
+const API = "https://diman-counter-4okir.mythic-peach-5761.chatgpt.site";
 const $ = id => document.getElementById(id);
-const root=document.documentElement,art=$('hat-art'),stage=$('hat-stage'),tilt=$('hat-tilt'),showcase=$('colors'),greeting=$('hat-greeting');
-const reducedMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
-const artworkCache=new Map(),storageKey='shlyapa-studio-v2';
-let artworkRequest=0,favoritesRequest=0,motionTimer,storageAvailable=true,saved={};
-try{saved=JSON.parse(localStorage.getItem(storageKey)||'{}')||{};}catch{storageAvailable=false;}
-let look=parseLook(location.search)||normalizeLook(saved.look||DEFAULT_LOOK);
-let favorites=normalizeFavorites(saved.favorites);
-function announce(message){$('studio-status').textContent=message;}
-function persist(){
-  try{localStorage.setItem(storageKey,JSON.stringify({look,favorites}));storageAvailable=true;return true;}
-  catch{storageAvailable=false;return false;}
+const format = new Intl.NumberFormat('ru-RU');
+const timeFormat = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const dayFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit' });
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+let persistent = true;
+let storage;
+try { storage = localStorage; storage.setItem('diman-counter:probe', '1'); storage.removeItem('diman-counter:probe'); }
+catch {
+  persistent = false;
+  const memory = new Map();
+  storage = { get length() { return memory.size; }, key: index => [...memory.keys()][index] ?? null,
+    getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value), removeItem: key => memory.delete(key) };
 }
-async function getArtwork(style){
-  if(!artworkCache.has(style)){
-    const promise=fetch(new URL('./'+STYLES[style].file,document.baseURI)).then(async response=>{
-      if(!response.ok)throw new Error('Artwork unavailable');
-      const source=await response.text(),parsed=new DOMParser().parseFromString(source,'image/svg+xml');
-      if(parsed.querySelector('parsererror')||parsed.documentElement.localName!=='svg')throw new Error('Invalid SVG');
-      return source;
+let device = readJson(storage, DEVICE_KEY);
+if (!validDevice(device)) device = null;
+const cached = readJson(storage, SNAPSHOT_KEY);
+let snapshot = validSnapshot(cached?.value) ? cached.value : null;
+if (snapshot && cached.device !== device?.device) snapshot = { ...snapshot, ownLastEventId: null };
+let reachable = false, syncing = false, reading = false, starting = false;
+let lastSuccess = 0, lastOrder = Date.now() * 1000, toastTimer, animationTimer;
+const LIMIT = 500;
+
+function toast(message) { clearTimeout(toastTimer); $('toast').textContent = message; toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 7000); }
+function pending() { try { return readPending(storage); } catch { return []; } }
+function undoTarget(operations = pending()) {
+  if (!device) return null;
+  const own = operations.filter(value => value.device === device.device);
+  const cancelled = new Set(own.filter(value => value.action === 'undo').map(value => value.target));
+  const latest = [...own].reverse().find(value => value.action === 'increment' && !cancelled.has(value.id));
+  if (latest) return latest.id;
+  return snapshot?.ownLastEventId && !cancelled.has(snapshot.ownLastEventId) ? snapshot.ownLastEventId : null;
+}
+function render() {
+  const operations = pending();
+  $('counter-value').textContent = snapshot ? format.format(snapshot.total) : '—';
+  $('today-value').textContent = snapshot && dayFormat.format(new Date(snapshot.serverTime)) === dayFormat.format(new Date()) ? format.format(snapshot.today) : '—';
+  $('last-value').textContent = snapshot?.lastAt ? timeFormat.format(new Date(snapshot.lastAt)) + ' МСК' : 'Пока тихо';
+  $('increment').disabled = !device || operations.length >= LIMIT;
+  $('undo').disabled = !undoTarget(operations) || operations.length >= LIMIT;
+  const fresh = reachable && Date.now() - lastSuccess < 18000;
+  document.body.dataset.connection = fresh ? (operations.length || syncing ? 'syncing' : 'online') : (starting ? 'syncing' : 'offline');
+  $('connection-status').textContent = fresh ? (operations.length ? 'Сохраняем в общую базу…' : 'Сохранено · общий для всех')
+    : starting ? 'Подключаем общую базу…' : snapshot ? 'Нет связи · последнее сохранённое число' : 'Не удалось подключиться к базе';
+  $('retry-sync').hidden = fresh || starting;
+  $('pending-note').textContent = operations.length
+    ? 'Ожидают подтверждения: ' + format.format(operations.length) + '. ' + (persistent ? 'Очередь сохранена на этом устройстве.' : 'Оставьте страницу открытой до сохранения.')
+    : persistent ? '' : 'Данные уже в общей базе. При потере связи оставьте страницу открытой до подтверждения.';
+  $('counter-value').style.fontSize = snapshot?.total >= 1000000 ? 'clamp(56px, 13vw, 145px)' : '';
+}
+function applySnapshot(value, sourceDevice) {
+  if (!validSnapshot(value)) throw new Error('Сервер вернул некорректное значение.');
+  if (snapshot && value.revision < snapshot.revision) return;
+  const previousTotal = snapshot?.total;
+  const ownLastEventId = sourceDevice === device?.device ? value.ownLastEventId : snapshot?.ownLastEventId ?? null;
+  snapshot = mergeSnapshot(snapshot, { ...value, ownLastEventId });
+  try { storage.setItem(SNAPSHOT_KEY, JSON.stringify({ value: snapshot, device: device?.device })); } catch { /* The confirmed value remains on the server. */ }
+  reachable = true; lastSuccess = Date.now();
+  if (previousTotal !== undefined && previousTotal !== snapshot.total && !reducedMotion.matches) {
+    clearTimeout(animationTimer);
+    $('counter-value').classList.remove('is-bumping'); $('stage-puff').classList.remove('is-puffing');
+    void $('counter-value').offsetWidth;
+    $('counter-value').classList.add('is-bumping'); $('stage-puff').classList.add('is-puffing');
+    animationTimer = setTimeout(() => { $('counter-value').classList.remove('is-bumping'); $('stage-puff').classList.remove('is-puffing'); }, 700);
+  }
+  render();
+}
+async function request(path, { method = 'GET', token, body } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(API + path, {
+      method, credentials: 'omit', cache: 'no-store', signal: controller.signal,
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {})
     });
-    artworkCache.set(style,promise);promise.catch(()=>artworkCache.delete(style));
-  }
-  return artworkCache.get(style);
+    const value = await response.json();
+    if (!response.ok) { const error = new Error(value.error || 'Не удалось сохранить. Попробуем ещё раз.'); error.status = response.status; throw error; }
+    return value;
+  } finally { clearTimeout(timeout); }
 }
-async function renderHat(){
-  const request=++artworkRequest,style=look.style;
-  art.setAttribute('aria-busy','true');
-  try{
-    const source=await getArtwork(style);if(request!==artworkRequest)return;
-    const parsed=new DOMParser().parseFromString(source,'image/svg+xml');
-    const svg=document.importNode(parsed.documentElement,true);
-    svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');art.replaceChildren(svg);
-  }catch{
-    if(request!==artworkRequest)return;
-    const image=document.createElement('img');image.src='./'+STYLES[style].file;image.alt='';image.width=900;image.height=650;art.replaceChildren(image);
-    announce('Рисунок временно недоступен. Попробуйте другой фасон или обновите страницу.');
-  }finally{if(request===artworkRequest)art.removeAttribute('aria-busy');}
+async function connect() {
+  if (starting) return;
+  starting = true; render();
+  try {
+    if (!device) {
+      const identity = await request('/api/device', { method: 'POST' });
+      if (!validDevice(identity)) throw new Error('Не удалось подключить устройство.');
+      device = identity;
+      try { storage.setItem(DEVICE_KEY, JSON.stringify(device)); } catch { persistent = false; }
+    }
+    await refresh();
+    if (reachable) await flush();
+  } catch { reachable = false; }
+  finally { starting = false; render(); }
 }
-function applyLook(value,message=''){
-  const previousStyle=look.style;
-  look=normalizeLook({...look,...value});
-  const color=COLORS[look.color],ribbon=RIBBONS[look.ribbon],scene=sceneColors(look);
-  for(const key of ['main','light','dark']){
-    root.style.setProperty('--hat-'+key,color[key]);root.style.setProperty('--ribbon-'+key,ribbon[key]);
-  }
-  root.style.setProperty('--scene',scene.background);root.style.setProperty('--circle',scene.circle);
-  showcase.style.setProperty('--scene-ink',scene.ink);showcase.style.setProperty('--scene-muted',scene.muted);
-  showcase.classList.toggle('is-night',look.scene==='night');
-  $('style-code').textContent='ФОРМА № '+STYLES[look.style].number;
-  $('color-name').textContent=color.name;
-  $('color-code').textContent=String(Object.keys(COLORS).indexOf(look.color)+1).padStart(2,'0')+' / '+color.name.toUpperCase();
-  $('look-character').textContent=STYLES[look.style].character;
-  $('look-summary').textContent=STYLES[look.style].name+' · '+color.name+' · '+SCENES[look.scene];
-  art.setAttribute('aria-label',STYLES[look.style].name+'. Цвет: '+color.name+'. Лента: '+ribbon.name);
-  for(const key of ['style','color','ribbon','scene'])document.querySelectorAll('[data-'+key+']').forEach(button=>{
-    const selected=button.dataset[key]===look[key];
-    button.classList.toggle('is-selected',selected);button.setAttribute('aria-pressed',String(selected));
-  });
-  const isFavorite=favorites.some(item=>lookKey(item)===lookKey(look));
-  $('save-look').classList.toggle('is-saved',isFavorite);
-  $('save-look').setAttribute('aria-label',isFavorite?'Этот образ уже в избранном':'Сохранить образ в избранное');
-  $('share-fallback').hidden=true;
-  if(previousStyle!==look.style||!art.querySelector('svg'))renderHat();
-  persist();announce(message);
+async function refresh() {
+  if (!device || reading) return;
+  reading = true;
+  try {
+    const value = await request('/api/count?device=' + encodeURIComponent(device.device), { token: device.token });
+    applySnapshot(value, device.device);
+  } catch (error) {
+    reachable = false;
+    if (error.status === 401 && !pending().length) { device = null; try { storage.removeItem(DEVICE_KEY); } catch {} }
+  } finally { reading = false; render(); }
 }
-for(const key of ['style','color','ribbon','scene'])document.querySelectorAll('[data-'+key+']').forEach(button=>button.addEventListener('click',()=>applyLook({[key]:button.dataset[key]})));
-function goToStudio(){showcase.scrollIntoView({behavior:reducedMotion.matches?'instant':'smooth',block:'start'});}
-document.querySelectorAll('[data-pick-style]').forEach(button=>button.addEventListener('click',()=>{
-  applyLook({style:button.dataset.pickStyle},'Примеряем: '+STYLES[button.dataset.pickStyle].name+'.');goToStudio();
-}));
-document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{
-  applyLook(PRESETS[button.dataset.preset],'Готовый образ примерен. Добавьте свой штрих.');goToStudio();
-}));
-window.addEventListener('hat:recommend',event=>{applyLook(normalizeLook(event.detail),'Ваш образ из теста уже в мастерской.');goToStudio();});
-function randomFrom(object){const keys=Object.keys(object);return keys[Math.floor(Math.random()*keys.length)];}
-$('random-look').addEventListener('click',()=>{
-  const next={style:randomFrom(STYLES),color:randomFrom(COLORS),ribbon:randomFrom(RIBBONS),scene:randomFrom(SCENES)};
-  if(lookKey(next)===lookKey(look)){const colors=Object.keys(COLORS);next.color=colors[(colors.indexOf(look.color)+1)%colors.length];}
-  applyLook(next,'Случай распорядился красиво. Как вам?');playMotion('tip');
+async function flush() {
+  if (syncing || !device) return;
+  syncing = true; render();
+  try {
+    for (let i = 0; i < LIMIT; i++) {
+      const operation = pending()[0];
+      if (!operation) break;
+      try {
+        const value = await request('/api/events', { method: 'POST', token: operation.token, body: eventBody(operation) });
+        applySnapshot(value, operation.device);
+        removeOperation(storage, operation.id);
+      } catch (error) {
+        if (operation.action === 'undo' && [404, 409].includes(error.status)) {
+          removeOperation(storage, operation.id);
+          toast('Нажатие уже отменено или не найдено. Обновляем общий счётчик.');
+          continue;
+        }
+        reachable = false;
+        if (error.status) toast(error.message);
+        break;
+      }
+      render();
+    }
+  } finally { syncing = false; render(); }
+  if (reachable) await refresh();
+}
+function enqueue(action, target) {
+  if (!device) return;
+  const operations = pending();
+  if (operations.length >= LIMIT) { toast('Очередь заполнена. Дождитесь синхронизации.'); return; }
+  lastOrder = Math.max(Date.now() * 1000, lastOrder + 1, ...operations.map(value => value.order + 1));
+  const operation = { action, id: crypto.randomUUID(), device: device.device, token: device.token, order: lastOrder, ...(target ? { target } : {}) };
+  try { storeOperation(storage, operation); }
+  catch { toast('Браузер не смог сохранить нажатие. Попробуйте освободить место и повторить.'); return; }
+  toast(action === 'increment' ? 'Зафиксировали. Сохраняем…' : 'Отменяем ваше последнее нажатие…');
+  render(); flush();
+}
+$('increment').addEventListener('click', () => enqueue('increment'));
+$('undo').addEventListener('click', () => { const target = undoTarget(); if (target) enqueue('undo', target); });
+$('retry-sync').addEventListener('click', () => connect());
+$('share').addEventListener('click', async () => {
+  const url = 'https://4okir.github.io/clientc/';
+  try {
+    if (navigator.share) await navigator.share({ title: 'Счётчик пердышей Димана', url });
+    else { await navigator.clipboard.writeText(url); toast('Ссылка скопирована. Счётчик у всех будет общий.'); }
+  } catch (error) { if (error.name !== 'AbortError') toast('Ссылка на счётчик: ' + url); }
 });
-stage.addEventListener('pointermove',event=>{
-  if(reducedMotion.matches||event.pointerType!=='mouse')return;
-  const bounds=stage.getBoundingClientRect();
-  tilt.style.setProperty('--tilt-x',(-((event.clientY-bounds.top)/bounds.height-.5)*9)+'deg');
-  tilt.style.setProperty('--tilt-y',(((event.clientX-bounds.left)/bounds.width-.5)*12)+'deg');
-});
-stage.addEventListener('pointerleave',()=>{tilt.style.setProperty('--tilt-x','0deg');tilt.style.setProperty('--tilt-y','0deg');});
-const motionClasses=['is-tipping','is-spinning','is-bouncing'];
-function playMotion(motion){
-  clearTimeout(motionTimer);art.classList.remove(...motionClasses);
-  const confetti=$('confetti');confetti.replaceChildren();
-  const messages={tip:'Снимаю шляпу перед вами.',spin:'Эффектный поворот событий.',bounce:'Настроение — выше головы.',party:'Повод нашёлся. Это вы.'};
-  greeting.textContent=messages[motion]||messages.tip;greeting.classList.add('is-visible');
-  if(!reducedMotion.matches){
-    void art.offsetWidth;
-    art.classList.add(({tip:'is-tipping',spin:'is-spinning',bounce:'is-bouncing',party:'is-bouncing'})[motion]||'is-tipping');
-    if(motion==='party')for(let i=0;i<25;i++){
-      const piece=document.createElement('i');
-      piece.style.setProperty('--piece-x',(Math.random()*100)+'%');
-      piece.style.setProperty('--piece-delay',(Math.random()*.45)+'s');
-      piece.style.setProperty('--piece-color',['#b94c30','#d1bd73','#f4f0e7','#7a8b60'][i%4]);
-      piece.style.setProperty('--piece-turn',(Math.random()*540-270)+'deg');confetti.append(piece);
+window.addEventListener('online', () => connect());
+window.addEventListener('offline', () => { reachable = false; render(); });
+window.addEventListener('storage', event => {
+  if (event.key?.startsWith(PENDING_PREFIX)) { render(); flush(); }
+  if (event.key === SNAPSHOT_KEY) {
+    const next = readJson(storage, SNAPSHOT_KEY);
+    if (validSnapshot(next?.value) && (!snapshot || next.value.revision >= snapshot.revision)) {
+      snapshot = { ...next.value, ownLastEventId: next.device === device?.device ? next.value.ownLastEventId : snapshot?.ownLastEventId ?? null }; render();
     }
   }
-  motionTimer=setTimeout(()=>{art.classList.remove(...motionClasses);greeting.classList.remove('is-visible');greeting.textContent='';confetti.replaceChildren();},2600);
-}
-$('tip-hat').addEventListener('click',()=>playMotion('tip'));
-document.querySelectorAll('[data-motion]').forEach(button=>button.addEventListener('click',()=>playMotion(button.dataset.motion)));
-$('share-look').addEventListener('click',async()=>{
-  const url=lookUrl(location.href,look);
-  try{await navigator.clipboard.writeText(url);announce('Ссылка на ваш образ скопирована. Можно отправлять.');}
-  catch{const input=$('share-url');input.value=url;$('share-fallback').hidden=false;input.focus();input.select();announce('Скопируйте выделенную ссылку на образ.');}
 });
-$('download-look').addEventListener('click',async()=>{
-  const snapshot={...look},button=$('download-look');button.disabled=true;
-  try{
-    const source=colorizeSvg(await getArtwork(snapshot.style),snapshot);
-    const parsed=new DOMParser().parseFromString(source,'image/svg+xml'),svg=parsed.documentElement;
-    svg.setAttribute('width','900');svg.setAttribute('height','650');
-    const background=parsed.createElementNS('http://www.w3.org/2000/svg','rect');
-    background.setAttribute('width','900');background.setAttribute('height','650');
-    background.setAttribute('fill',sceneColors(snapshot).background);svg.insertBefore(background,svg.firstChild);
-    const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml;charset=utf-8'}));
-    const link=document.createElement('a');link.href=url;link.download='shlyapa-'+snapshot.style+'-'+snapshot.color+'.svg';
-    document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
-    announce('Образ сохранён в SVG. Его можно открыть в браузере или редакторе.');
-  }catch{announce('Не получилось скачать образ. Попробуйте ещё раз.');}
-  finally{button.disabled=false;}
-});
-function svgDataUrl(source){return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(source);}
-function renderFavorites(focusIndex=null){
-  const request=++favoritesRequest,grid=$('favorites-grid');grid.replaceChildren();
-  $('favorites-empty').hidden=favorites.length>0;
-  for(const [index,item] of favorites.entries()){
-    const card=document.createElement('article');card.className='favorite-card';
-    const preview=document.createElement('button');preview.type='button';preview.className='favorite-preview';preview.style.background=sceneColors(item).background;
-    preview.setAttribute('aria-label','Примерить: '+STYLES[item.style].name+', '+COLORS[item.color].name);
-    const image=document.createElement('img');image.alt='';image.width=900;image.height=650;preview.append(image);
-    preview.addEventListener('click',()=>{applyLook(item,'Любимый образ снова с вами.');goToStudio();});
-    const title=document.createElement('h3');title.textContent=STYLES[item.style].name+' / '+COLORS[item.color].name;
-    const caption=document.createElement('p');caption.textContent=RIBBONS[item.ribbon].name+' · '+SCENES[item.scene];
-    const remove=document.createElement('button');remove.type='button';remove.className='favorite-remove';remove.textContent='Убрать ×';
-    remove.setAttribute('aria-label','Убрать из избранного: '+title.textContent);
-    remove.addEventListener('click',()=>{
-      favorites=favorites.filter(value=>lookKey(value)!==lookKey(item));persist();renderFavorites(index);
-      applyLook(look,'Образ убран из коллекции.');$('favorites-status').textContent='Образ убран из коллекции.';
-    });
-    card.append(preview,title,caption,remove);grid.append(card);
-    getArtwork(item.style).then(source=>{if(request===favoritesRequest)image.src=svgDataUrl(colorizeSvg(source,item));}).catch(()=>{image.alt=STYLES[item.style].name;});
-  }
-  if(focusIndex!==null){const buttons=grid.querySelectorAll('.favorite-remove');(buttons[Math.min(focusIndex,buttons.length-1)]||$('favorites-empty').querySelector('a')).focus();}
-}
-$('save-look').addEventListener('click',()=>{
-  if(favorites.some(item=>lookKey(item)===lookKey(look))){announce('Этот образ уже в вашей коллекции.');return;}
-  if(favorites.length===8){announce('В коллекции уже восемь образов. Уберите один, чтобы сохранить новый.');return;}
-  favorites.push({...look});const ok=persist();renderFavorites();
-  applyLook(look,ok?'Образ добавлен в вашу личную коллекцию.':'Образ добавлен на время этой страницы: сохранение в браузере недоступно.');
-});
-for(const image of document.querySelectorAll('[data-preview]')){
-  const preset=PRESETS[image.dataset.preview];
-  getArtwork(preset.style).then(source=>{image.src=svgDataUrl(colorizeSvg(source,preset));}).catch(()=>{});
-}
-applyLook(look);renderFavorites();
-if(!storageAvailable)announce('Сохранение в браузере недоступно. Образы можно скачать или отправить ссылкой.');
+document.addEventListener('visibilitychange', () => { if (!document.hidden) connect(); });
+window.addEventListener('pageshow', () => connect());
+setInterval(() => { if (!document.hidden) { if (!device) connect(); else { refresh(); flush(); } } }, 5000);
+render(); connect();
