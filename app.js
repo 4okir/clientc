@@ -23,6 +23,7 @@ if (snapshot && cached.device !== device?.device) snapshot = { ...snapshot, ownL
 let reachable = false, syncing = false, reading = false, starting = false;
 let lastSuccess = 0, lastOrder = Date.now() * 1000, toastTimer, animationTimer;
 const LIMIT = 500;
+let enhancements = null;
 
 function toast(message) { clearTimeout(toastTimer); $('toast').textContent = message; toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 7000); }
 function pending() { try { return readPending(storage); } catch { return []; } }
@@ -50,6 +51,7 @@ function render() {
     ? 'Ожидают подтверждения: ' + format.format(operations.length) + '. ' + (persistent ? 'Очередь сохранена на этом устройстве.' : 'Оставьте страницу открытой до сохранения.')
     : persistent ? '' : 'Данные уже в общей базе. При потере связи оставьте страницу открытой до подтверждения.';
   $('counter-value').style.fontSize = snapshot?.total >= 1000000 ? 'clamp(56px, 13vw, 145px)' : '';
+  try { enhancements?.render(snapshot); } catch { /* Optional presentation never blocks the counter. */ }
 }
 function applySnapshot(value, sourceDevice) {
   if (!validSnapshot(value)) throw new Error('Сервер вернул некорректное значение.');
@@ -117,8 +119,13 @@ async function flush() {
       if (!operation) break;
       try {
         const value = await request('/api/events', { method: 'POST', token: operation.token, body: eventBody(operation) });
+        let firstAcknowledgement = false;
+        try { firstAcknowledgement = storage.getItem(PENDING_PREFIX + operation.id) !== null; } catch {}
         applySnapshot(value, operation.device);
         removeOperation(storage, operation.id);
+        if (firstAcknowledgement && operation.action === 'increment' && operation.device === device.device) {
+          try { Promise.resolve(enhancements?.confirmedIncrement(snapshot?.total ?? value.total)).catch(() => {}); } catch {}
+        }
       } catch (error) {
         if (operation.action === 'undo' && [404, 409].includes(error.status)) {
           removeOperation(storage, operation.id);
@@ -170,3 +177,11 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) conn
 window.addEventListener('pageshow', () => connect());
 setInterval(() => { if (!document.hidden) { if (!device) connect(); else { refresh(); flush(); } } }, 5000);
 render(); connect();
+// Load entertainment after the reliable counter has started; failed downloads stay optional.
+import('./enhancements.js?v=4').then(({ mountEnhancements }) => {
+  enhancements = mountEnhancements({ storage, announce: toast });
+  enhancements.render(snapshot);
+}).catch(() => {
+  const button = $('sound-toggle'); if (button) button.disabled = true;
+  const label = $('sound-label'); if (label) label.textContent = 'Звук недоступен';
+});

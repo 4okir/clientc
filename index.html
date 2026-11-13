@@ -7,8 +7,8 @@
   <meta name="description" content="Счётчик пердышей Димана. Один общий счётчик, который сохраняет подтверждённые значения на всех устройствах.">
   <title>Счётчик пердышей Димана</title>
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=3">
-  <script src="./app.js?v=3" type="module"></script>
+  <link rel="stylesheet" href="./styles.css?v=4">
+  <script src="./app.js?v=4" type="module"></script>
 </head>
 <body data-connection="syncing">
   <a class="skip-link" href="#main">Перейти к счётчику</a>
@@ -18,7 +18,10 @@
         <svg class="brand-mark" viewBox="0 0 38 38" fill="none" aria-hidden="true"><path d="M4 14h19a5 5 0 1 0-5-5M4 20h27M4 26h14a5 5 0 1 1-5 5" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"/></svg>
         <span>ДИМАН<span class="brand-dot">.</span><small>АТМОСФЕРНЫЙ УЧЁТ</small></span>
       </a>
-      <button class="share-button" id="share" type="button" aria-label="Поделиться счётчиком"><span>Поделиться</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15V3m0 0L7 8m5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div class="header-actions">
+        <button class="sound-button" id="sound-toggle" type="button" aria-label="Звуковой отклик" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Zm4 4a5 5 0 0 1 0 6m3-9a9 9 0 0 1 0 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="sound-label">Звук: выкл.</span></button>
+        <button class="share-button" id="share" type="button" aria-label="Поделиться счётчиком"><span>Поделиться</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15V3m0 0L7 8m5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
     </header>
 
     <main id="main">
@@ -35,6 +38,7 @@
           <p class="count-label" id="count-label">ЗА ВСЁ ВРЕМЯ</p>
           <div class="counter-number" id="counter-value" role="status" aria-live="polite" aria-atomic="true" aria-labelledby="count-label">—</div>
           <p class="count-caption">зафиксировано в общей истории</p>
+          <p class="diman-phrase" id="diman-phrase">Атмосфера ждёт своего героя.</p>
         </div>
         <p class="pending-note" id="pending-note" role="status" aria-live="polite"></p>
         <div class="counter-actions">
@@ -48,6 +52,28 @@
       <section class="statistics" aria-label="Дополнительная статистика">
         <div class="stat-card"><div class="stat-heading"><span>СЕГОДНЯ</span><span class="stat-zone">МОСКВА · UTC+3</span></div><strong class="stat-value" id="today-value">—</strong><span class="stat-note">С 00:00 по московскому времени</span></div>
         <div class="stat-card"><div class="stat-heading"><span>ПОСЛЕДНИЙ РАЗ</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.3"/><path d="M10 5.5V10l3 1.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div><strong class="stat-value stat-last" id="last-value">Пока тихо</strong><span class="stat-note">Последний подтверждённый вклад</span></div>
+        <div class="stat-card stat-record"><div class="stat-heading"><span>РЕКОРД ЗА ДЕНЬ</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M6 3h8v5a4 4 0 0 1-8 0V3ZM6 5H3v2a3 3 0 0 0 3 3m8-5h3v2a3 3 0 0 1-3 3m-4 2v5m-3 0h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></div><strong class="stat-value" id="record-value">—</strong><span class="stat-note" id="record-date">Лучший день за всё время</span></div>
+      </section>
+
+      <section class="achievements" aria-labelledby="achievements-title">
+        <div class="achievements-heading"><p class="eyebrow">МАЛЕНЬКИЕ ДОСТИЖЕНИЯ</p><h2 id="achievements-title">Путь Димана<span>.</span></h2></div>
+        <div class="achievement-grid">
+          <article class="achievement-card" id="achievement-10" aria-labelledby="achievement-title-10" aria-describedby="achievement-status-10">
+            <div class="achievement-topline"><span class="achievement-icon" aria-hidden="true">↗</span><span>10</span></div>
+            <h3 id="achievement-title-10">Первый десяток</h3><p class="achievement-description" id="achievement-description-10">Уверенное начало.</p>
+            <progress id="achievement-progress-10" max="10" value="0" aria-labelledby="achievement-title-10">0 из 10</progress><p class="achievement-status" id="achievement-status-10">Осталось 10</p>
+          </article>
+          <article class="achievement-card" id="achievement-50" aria-labelledby="achievement-title-50" aria-describedby="achievement-status-50">
+            <div class="achievement-topline"><span class="achievement-icon" aria-hidden="true">✳</span><span>50</span></div>
+            <h3 id="achievement-title-50">Атмосферный деятель</h3><p class="achievement-description" id="achievement-description-50">Вклад уже заметен.</p>
+            <progress id="achievement-progress-50" max="50" value="0" aria-labelledby="achievement-title-50">0 из 50</progress><p class="achievement-status" id="achievement-status-50">Осталось 50</p>
+          </article>
+          <article class="achievement-card" id="achievement-100" aria-labelledby="achievement-title-100" aria-describedby="achievement-status-100">
+            <div class="achievement-topline"><span class="achievement-icon" aria-hidden="true">≈</span><span>100</span></div>
+            <h3 id="achievement-title-100">Диман — ураган</h3><p class="achievement-description" id="achievement-description-100">У стихии есть имя.</p>
+            <progress id="achievement-progress-100" max="100" value="0" aria-labelledby="achievement-title-100">0 из 100</progress><p class="achievement-status" id="achievement-status-100">Осталось 100</p>
+          </article>
+        </div>
       </section>
 
       <details class="save-details">
