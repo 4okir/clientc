@@ -178,7 +178,7 @@ window.addEventListener('pageshow', () => connect());
 setInterval(() => { if (!document.hidden) { if (!device) connect(); else { refresh(); flush(); } } }, 5000);
 render(); connect();
 // Load entertainment after the reliable counter has started; failed downloads stay optional.
-import('./enhancements.js?v=4').then(({ mountEnhancements }) => {
+import('./enhancements.js?v=5').then(({ mountEnhancements }) => {
   enhancements = mountEnhancements({ storage, announce: toast });
   enhancements.render(snapshot);
 }).catch(() => {

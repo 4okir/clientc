@@ -1,4 +1,4 @@
-import { getAchievements, getPhrase, createSoundPlayer } from './personality.js?v=4';
+import { getAchievements, getPhrase, createSoundPlayer } from './personality.js?v=5';
 
 export const SOUND_KEY = 'diman-counter:preferences:sound-v1';
 
@@ -9,8 +9,8 @@ export function mountEnhancements({ document = globalThis.document, storage, ann
   const date = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'long', year: 'numeric' });
   const soundButton = $('sound-toggle');
   const player = soundFactory();
-  let soundEnabled = false, userUnlocked = false, phraseIndex = -1, previousTotal = null;
-  try { soundEnabled = storage.getItem(SOUND_KEY) === 'true'; } catch {}
+  let soundEnabled = true, phraseIndex = -1, previousTotal = null;
+  try { soundEnabled = storage.getItem(SOUND_KEY) !== 'false'; } catch {}
   function soundState() {
     soundButton.disabled = !player.supported;
     soundButton.setAttribute('aria-pressed', String(soundEnabled && player.supported));
@@ -21,19 +21,17 @@ export function mountEnhancements({ document = globalThis.document, storage, ann
   soundButton.addEventListener('click', async () => {
     try {
       if (!player.supported) return;
-      if (soundEnabled) { soundEnabled = false; userUnlocked = false; saveSound(); soundState(); return; }
+      if (soundEnabled) { soundEnabled = false; saveSound(); soundState(); return; }
       const allowed = await player.unlock();
       soundEnabled = allowed === true;
-      userUnlocked = allowed === true;
       saveSound(); soundState();
       if (!allowed) announce('Не получилось включить звук. Попробуйте ещё раз.');
-    } catch { soundEnabled = false; userUnlocked = false; saveSound(); soundState(); }
+    } catch { soundEnabled = false; saveSound(); soundState(); }
   });
-  // Unlock only during the user's click; the puff waits for server confirmation.
+  // Play inside the user gesture, independently of network latency or saved events.
   $('increment').addEventListener('click', () => {
-    if (soundEnabled) {
-      try { Promise.resolve(player.unlock()).then(allowed => { userUnlocked = allowed === true; }).catch(() => {}); } catch {}
-    }
+    if (!soundEnabled || !player.supported || document.hidden) return;
+    try { return Promise.resolve(player.play()).catch(() => false); } catch { return false; }
   });
   function render(snapshot) {
     try {
@@ -71,7 +69,6 @@ export function mountEnhancements({ document = globalThis.document, storage, ann
       const phrase = getPhrase(total, phraseIndex); phraseIndex = phrase.index;
       $('diman-phrase').textContent = phrase.text;
       announce(phrase.text + ' Сохранено.');
-      if (soundEnabled && userUnlocked && !document.hidden) await player.play();
       return true;
     } catch { return false; }
   }

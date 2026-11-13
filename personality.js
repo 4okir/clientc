@@ -40,12 +40,19 @@ export function getPhrase(total, previousIndex, random = Math.random) {
   return { index, text: PHRASES[index].replace('{total}', String(safeTotal(total))) };
 }
 
-// The caller owns the opt-in preference. Nothing is initialized or played at import.
-// Call unlock() from the explicit sound-enable gesture, then play() after a saved +1.
-export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?? globalThis.webkitAudioContext } = {}) {
+const FART_VARIANTS = Object.freeze([
+  { duration: 0.23, high: 150, low: 55, pulses: 4, cutoff: 900, noise: 0.075, voice: 0.055 },
+  { duration: 0.31, high: 110, low: 40, pulses: 7, cutoff: 650, noise: 0.085, voice: 0.065 },
+  { duration: 0.43, high: 78, low: 29, pulses: 10, cutoff: 450, noise: 0.1, voice: 0.045 },
+  { duration: 0.49, high: 135, low: 43, pulses: 15, cutoff: 1100, noise: 0.08, voice: 0.06 }
+]);
+
+// The caller owns the sound preference. Importing/constructing never starts audio.
+// Invoke play() directly from the click gesture; it unlocks WebAudio internally.
+export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?? globalThis.webkitAudioContext, random = Math.random } = {}) {
   const supported = typeof AudioContextCtor === 'function';
   let context = null, noiseBuffer = null, closed = false, busy = false;
-  let lastPlayedAt = -Infinity;
+  let lastPlayedAt = -Infinity, lastVariant = -1;
   const activeSources = new Set();
   const disconnect = node => { try { node.disconnect(); } catch {} };
 
@@ -67,34 +74,49 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
     try {
       if (!await unlock()) return false;
       const start = context.currentTime;
-      if (start - lastPlayedAt < 0.18) return false;
-      const duration = 0.32;
+      if (start - lastPlayedAt < 0.08) return false;
+      let sample = 0;
+      try { sample = random(); } catch {}
+      sample = Number.isFinite(sample) ? Math.max(0, Math.min(1 - Number.EPSILON, sample)) : 0;
+      const choices = FART_VARIANTS.length - (lastVariant >= 0 ? 1 : 0);
+      let variantIndex = Math.floor(sample * choices);
+      if (lastVariant >= 0 && variantIndex >= lastVariant) variantIndex += 1;
+      const variant = FART_VARIANTS[variantIndex];
+      const { duration } = variant;
+      const track = node => { nodes.push(node); return node; };
       if (!noiseBuffer) {
-        noiseBuffer = context.createBuffer(1, Math.ceil(context.sampleRate * duration), context.sampleRate);
+        noiseBuffer = context.createBuffer(1, Math.ceil(context.sampleRate * 0.55), context.sampleRate);
         const channel = noiseBuffer.getChannelData(0);
         for (let i = 0; i < channel.length; i++) channel[i] = Math.random() * 2 - 1;
       }
-      const noise = context.createBufferSource(); noise.buffer = noiseBuffer;
-      const filter = context.createBiquadFilter(); filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(620, start);
+      const noise = track(context.createBufferSource()); noise.buffer = noiseBuffer;
+      const filter = track(context.createBiquadFilter()); filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(variant.cutoff, start);
       filter.frequency.exponentialRampToValueAtTime(120, start + duration);
       filter.Q.setValueAtTime(0.7, start);
-      const noiseGain = context.createGain();
+      const noiseGain = track(context.createGain());
       noiseGain.gain.setValueAtTime(0.0001, start);
-      noiseGain.gain.linearRampToValueAtTime(0.1, start + 0.025);
+      noiseGain.gain.linearRampToValueAtTime(variant.noise, start + 0.02);
       noiseGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
       noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(context.destination);
 
-      const voice = context.createOscillator(); voice.type = 'sawtooth';
-      voice.frequency.setValueAtTime(105, start);
-      voice.frequency.exponentialRampToValueAtTime(44, start + duration);
-      const voiceGain = context.createGain();
+      const voice = track(context.createOscillator()); voice.type = 'sawtooth';
+      voice.frequency.setValueAtTime(variant.high, start);
+      const voiceGain = track(context.createGain());
       voiceGain.gain.setValueAtTime(0.0001, start);
-      voiceGain.gain.linearRampToValueAtTime(0.035, start + 0.02);
+      voiceGain.gain.linearRampToValueAtTime(variant.voice, start + 0.012);
+      // Alternating pitch and pressure make a short comic "brrp", rather than a beep.
+      for (let pulse = 1; pulse <= variant.pulses; pulse++) {
+        const fraction = pulse / (variant.pulses + 1);
+        const time = start + duration * fraction;
+        const pitch = variant.high * Math.pow(variant.low / variant.high, fraction);
+        voice.frequency.linearRampToValueAtTime(pitch * (pulse % 2 ? 1.18 : 0.82), time);
+        voiceGain.gain.linearRampToValueAtTime(variant.voice * (pulse % 2 ? 0.48 : 1) * (1 - fraction * 0.55), time);
+      }
+      voice.frequency.exponentialRampToValueAtTime(variant.low, start + duration);
       voiceGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
       voice.connect(voiceGain); voiceGain.connect(context.destination);
 
-      nodes.push(noise, filter, noiseGain, voice, voiceGain);
       sources.push(noise, voice);
       const cleanup = () => { for (const node of nodes) disconnect(node); for (const source of sources) activeSources.delete(source); };
       let ended = 0;
@@ -104,6 +126,7 @@ export function createSoundPlayer({ AudioContextCtor = globalThis.AudioContext ?
         source.start(start); source.stop(start + duration + 0.015);
       }
       lastPlayedAt = start;
+      lastVariant = variantIndex;
       return true;
     } catch {
       for (const source of sources) { try { source.stop(); } catch {} activeSources.delete(source); }
